@@ -152,10 +152,10 @@ struct ContentView: View {
                                isPaused: sheet != nil || showManualInput || showImporter)
             RoundedRectangle(cornerRadius: 12)
                 .stroke(Color.green, lineWidth: 2)
-                .frame(width: 280, height: 110)
+                .frame(width: ScannerViewController.frameSize.width, height: ScannerViewController.frameSize.height)
             VStack {
                 Spacer()
-                Text(plusOneMode ? "読み取るたびに数量が1増えます" : "棚のラベルを枠内に合わせてください")
+                Text(plusOneMode ? "読み取るたびに数量が1増えます" : "読み取るバーコードを枠の中央に合わせてください")
                     .font(.caption)
                     .padding(.horizontal, 10)
                     .padding(.vertical, 4)

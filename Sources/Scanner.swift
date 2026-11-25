@@ -21,6 +21,15 @@ final class ScannerViewController: UIViewController, AVCaptureMetadataOutputObje
     var onScanned: ((String) -> Void)?
     private let session = AVCaptureSession()
     private var previewLayer: AVCaptureVideoPreviewLayer?
+    private var metadataOutput: AVCaptureMetadataOutput?
+    /// 画面の緑の枠と同じ大きさ（この範囲だけ読み取る）
+    static let frameSize = CGSize(width: 280, height: 80)
+
+    private var scanRect: CGRect {
+        let w = min(Self.frameSize.width, view.bounds.width)
+        let h = min(Self.frameSize.height, view.bounds.height)
+        return CGRect(x: view.bounds.midX - w / 2, y: view.bounds.midY - h / 2, width: w, height: h)
+    }
     private var isPaused = false
     private var lastCode: String?
     private var lastSeen: Date = .distantPast
@@ -81,6 +90,7 @@ final class ScannerViewController: UIViewController, AVCaptureMetadataOutputObje
                 .itf14, .interleaved2of5, .qr, .dataMatrix
             ]
             output.metadataObjectTypes = wanted.filter { output.availableMetadataObjectTypes.contains($0) }
+            metadataOutput = output
         }
 
         let preview = AVCaptureVideoPreviewLayer(session: session)
@@ -90,13 +100,24 @@ final class ScannerViewController: UIViewController, AVCaptureMetadataOutputObje
         previewLayer = preview
 
         let s = session
-        DispatchQueue.global(qos: .userInitiated).async { s.startRunning() }
+        DispatchQueue.global(qos: .userInitiated).async {
+            s.startRunning()
+            DispatchQueue.main.async { self.updateRectOfInterest() }
+        }
     }
 
     override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
         previewLayer?.frame = view.bounds
         updatePreviewRotation()
+        updateRectOfInterest()
+    }
+
+    private func updateRectOfInterest() {
+        guard let layer = previewLayer, let output = metadataOutput, session.isRunning else { return }
+        // 枠より少しだけ広く取る（端のバーコードが欠けないように）
+        let r = scanRect.insetBy(dx: -10, dy: -10)
+        output.rectOfInterest = layer.metadataOutputRectConverted(fromLayerRect: r)
     }
 
     private func updatePreviewRotation() {
@@ -122,8 +143,18 @@ final class ScannerViewController: UIViewController, AVCaptureMetadataOutputObje
     }
 
     func metadataOutput(_ output: AVCaptureMetadataOutput, didOutput metadataObjects: [AVMetadataObject], from connection: AVCaptureConnection) {
-        guard let obj = metadataObjects.first as? AVMetadataMachineReadableCodeObject,
-              let raw = obj.stringValue else { return }
+        // 複数のバーコードが映った時は、枠の中心に一番近いものを選ぶ
+        let center = CGPoint(x: scanRect.midX, y: scanRect.midY)
+        var best: (code: String, dist: CGFloat)?
+        for o in metadataObjects {
+            guard let c = o as? AVMetadataMachineReadableCodeObject, let v = c.stringValue else { continue }
+            let rect = previewLayer?.transformedMetadataObject(for: c)?.bounds ?? .zero
+            // 中心が枠の外にあるものは無視
+            if previewLayer != nil && !scanRect.contains(CGPoint(x: rect.midX, y: rect.midY)) { continue }
+            let d = hypot(rect.midX - center.x, rect.midY - center.y)
+            if best == nil || d < best!.dist { best = (v, d) }
+        }
+        guard let raw = best?.code else { return }
         let code = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !code.isEmpty else { return }
         let now = Date()
