@@ -47,6 +47,8 @@ struct Toast: Equatable {
 struct ContentView: View {
     @StateObject private var store = InventoryStore()
     @AppStorage("plusOneMode") private var plusOneMode = false
+    @AppStorage("cameraZoom") private var zoom = 1.0
+    @State private var torchOn = false
     @State private var sheet: ActiveSheet?
     @State private var filter: ListFilter = .all
     @State private var searchText = ""
@@ -149,10 +151,42 @@ struct ContentView: View {
     private var scannerArea: some View {
         ZStack {
             BarcodeScannerView(onScanned: { handleScan($0) },
-                               isPaused: sheet != nil || showManualInput || showImporter)
+                               isPaused: sheet != nil || showManualInput || showImporter,
+                               zoom: zoom, torchOn: torchOn)
             RoundedRectangle(cornerRadius: 12)
                 .stroke(Color.green, lineWidth: 2)
                 .frame(width: ScannerViewController.frameSize.width, height: ScannerViewController.frameSize.height)
+            VStack {
+                HStack {
+                    Spacer()
+                    VStack(spacing: 8) {
+                        ForEach([1.0, 2.0, 3.0], id: \.self) { z in
+                            Button {
+                                zoom = z
+                            } label: {
+                                Text("\(Int(z))x")
+                                    .font(.caption.bold())
+                                    .frame(width: 38, height: 38)
+                                    .background(zoom == z ? Color.yellow : Color.black.opacity(0.55))
+                                    .foregroundColor(zoom == z ? .black : .white)
+                                    .clipShape(Circle())
+                            }
+                        }
+                        Button {
+                            torchOn.toggle()
+                        } label: {
+                            Image(systemName: torchOn ? "flashlight.on.fill" : "flashlight.off.fill")
+                                .font(.callout)
+                                .frame(width: 38, height: 38)
+                                .background(torchOn ? Color.yellow : Color.black.opacity(0.55))
+                                .foregroundColor(torchOn ? .black : .white)
+                                .clipShape(Circle())
+                        }
+                    }
+                    .padding(.trailing, 8)
+                }
+                Spacer()
+            }
             VStack {
                 Spacer()
                 Text(plusOneMode ? "読み取るたびに数量が1増えます" : "読み取るバーコードを枠の中央に合わせてください")
