@@ -35,6 +35,13 @@ jobs:
             CODE_SIGN_IDENTITY="" \
             build
 
+      - name: Check Info.plist
+        run: |
+          P=build/Build/Products/Release-iphoneos/JanScanner.app/Info.plist
+          plutil -p "$P"
+          /usr/libexec/PlistBuddy -c "Print :NSCameraUsageDescription" "$P"
+          /usr/libexec/PlistBuddy -c "Print :UILaunchScreen" "$P"
+
       - name: Package IPA
         run: |
           mkdir -p Payload

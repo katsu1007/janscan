@@ -11,6 +11,23 @@ targets:
       - path: Sources
     info:
       path: Info.plist
+      properties:
+        CFBundleDevelopmentRegion: ja_JP
+        CFBundleDisplayName: JANスキャナー
+        CFBundleName: JANスキャナー
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        NSCameraUsageDescription: 棚のラベルや商品のバーコードを読み取るためにカメラを使用します。
+        UIFileSharingEnabled: true
+        LSSupportsOpeningDocumentsInPlace: true
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+        UISupportedInterfaceOrientations~ipad:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationPortraitUpsideDown
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.katsu1007.janscanner.app
