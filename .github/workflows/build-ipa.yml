@@ -5,9 +5,12 @@ on:
     branches: [ main ]
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   build:
-    runs-on: macos-26
+    runs-on: macos-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -20,10 +23,12 @@ jobs:
 
       - name: Build Unsigned App
         run: |
+          set -o pipefail
           xcodebuild -project JanScanner.xcodeproj \
             -scheme JanScanner \
             -configuration Release \
             -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
             -derivedDataPath build \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
@@ -36,8 +41,16 @@ jobs:
           cp -r build/Build/Products/Release-iphoneos/JanScanner.app Payload/
           zip -qr JanScanner.ipa Payload
 
-      - name: Upload IPA
+      - name: Upload IPA (Artifact)
         uses: actions/upload-artifact@v4
         with:
           name: JanScanner-ipa
           path: JanScanner.ipa
+
+      - name: Publish Release (latest)
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ github.run_number }}
+          name: JanScanner build ${{ github.run_number }}
+          files: JanScanner.ipa
+          make_latest: true

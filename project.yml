@@ -16,3 +16,7 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: com.katsu1007.janscanner.app
         CODE_SIGNING_ALLOWED: "NO"
         CODE_SIGNING_REQUIRED: "NO"
+        TARGETED_DEVICE_FAMILY: "1,2"
+        SWIFT_VERSION: "5.0"
+        MARKETING_VERSION: "1.1"
+        CURRENT_PROJECT_VERSION: "2"

@@ -33,23 +33,36 @@ class ProductStore: ObservableObject {
         }
     }
 
-    func upsert(jan: String, name: String, incrementCount: Bool = true) {
+    func upsert(jan: String, name: String, count: Int) {
         if let idx = items.firstIndex(where: { $0.jan == jan }) {
             items[idx].name = name
-            if incrementCount { items[idx].count += 1 }
+            items[idx].count = max(0, count)
             items[idx].updatedAt = Date()
             let updated = items.remove(at: idx)
             items.insert(updated, at: 0)
         } else {
-            let newItem = ProductItem(jan: jan, name: name, count: 1, updatedAt: Date())
+            let newItem = ProductItem(jan: jan, name: name, count: max(0, count), updatedAt: Date())
             items.insert(newItem, at: 0)
         }
         save()
     }
 
-    func delete(at offsets: IndexSet) {
-        items.remove(atOffsets: offsets)
+    func delete(ids: [String]) {
+        items.removeAll { ids.contains($0.jan) }
         save()
+    }
+
+    /// JAN-13 / JAN-8 のチェックデジット確認
+    static func isValidJAN(_ code: String) -> Bool {
+        guard code.count == 13 || code.count == 8,
+              code.allSatisfy({ $0.isASCII && $0.isNumber }) else { return false }
+        let digits = code.compactMap { Int(String($0)) }
+        let body = digits.dropLast()
+        var sum = 0
+        for (i, d) in body.reversed().enumerated() {
+            sum += (i % 2 == 0) ? d * 3 : d
+        }
+        return (10 - sum % 10) % 10 == digits.last
     }
 
     func exportCSV() -> String {
@@ -67,8 +80,12 @@ class ProductStore: ObservableObject {
         let accessing = url.startAccessingSecurityScopedResource()
         defer { if accessing { url.stopAccessingSecurityScopedResource() } }
 
-        let raw = try String(contentsOf: url, encoding: .utf8)
-            .replacingOccurrences(of: "\u{FEFF}", with: "")
+        let data = try Data(contentsOf: url)
+        guard let decoded = String(data: data, encoding: .utf8)
+                ?? String(data: data, encoding: .shiftJIS) else {
+            throw CocoaError(.fileReadInapplicableStringEncoding)
+        }
+        let raw = decoded.replacingOccurrences(of: "\u{FEFF}", with: "")
         let rows = raw.components(separatedBy: .newlines).filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
 
         var importedCount = 0
@@ -76,12 +93,14 @@ class ProductStore: ObservableObject {
             let cols = parseCSVRow(row)
             guard cols.count >= 2 else { continue }
             let jan = cols[0].trimmingCharacters(in: .whitespacesAndNewlines)
+                .replacingOccurrences(of: "=", with: "")
+                .replacingOccurrences(of: "\"", with: "")
             let name = cols[1].trimmingCharacters(in: .whitespacesAndNewlines)
             if index == 0 && (jan.contains("JAN") || jan.contains("jan") || jan.contains("コード")) {
                 continue
             }
             guard !jan.isEmpty else { continue }
-            let count = cols.count >= 3 ? (Int(cols[2]) ?? 1) : 1
+            let count = cols.count >= 3 ? (Int(cols[2].trimmingCharacters(in: .whitespaces)) ?? 1) : 1
 
             if let idx = items.firstIndex(where: { $0.jan == jan }) {
                 items[idx].name = name
@@ -175,9 +194,43 @@ class ScannerViewController: UIViewController, AVCaptureMetadataOutputObjectsDel
         super.viewDidLoad()
         view.backgroundColor = .black
 
+        switch AVCaptureDevice.authorizationStatus(for: .video) {
+        case .authorized:
+            setupCamera()
+        case .notDetermined:
+            AVCaptureDevice.requestAccess(for: .video) { granted in
+                DispatchQueue.main.async {
+                    if granted { self.setupCamera() } else { self.showMessage("カメラが許可されていません。\n設定アプリからカメラを許可してください。") }
+                }
+            }
+        default:
+            showMessage("カメラが許可されていません。\n設定アプリからカメラを許可してください。")
+        }
+    }
+
+    private func showMessage(_ text: String) {
+        let label = UILabel()
+        label.text = text
+        label.textColor = .white
+        label.numberOfLines = 0
+        label.textAlignment = .center
+        label.font = .preferredFont(forTextStyle: .footnote)
+        label.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(label)
+        NSLayoutConstraint.activate([
+            label.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+            label.centerYAnchor.constraint(equalTo: view.centerYAnchor),
+            label.leadingAnchor.constraint(greaterThanOrEqualTo: view.leadingAnchor, constant: 16)
+        ])
+    }
+
+    private func setupCamera() {
         guard let device = AVCaptureDevice.default(for: .video),
               let input = try? AVCaptureDeviceInput(device: device),
-              session.canAddInput(input) else { return }
+              session.canAddInput(input) else {
+            showMessage("カメラを起動できませんでした。")
+            return
+        }
 
         session.addInput(input)
 
@@ -202,6 +255,21 @@ class ScannerViewController: UIViewController, AVCaptureMetadataOutputObjectsDel
     override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
         previewLayer?.frame = view.bounds
+        updatePreviewRotation()
+    }
+
+    private func updatePreviewRotation() {
+        guard let connection = previewLayer?.connection else { return }
+        let angle: CGFloat
+        switch view.window?.windowScene?.interfaceOrientation ?? .portrait {
+        case .landscapeLeft: angle = 180
+        case .landscapeRight: angle = 0
+        case .portraitUpsideDown: angle = 270
+        default: angle = 90
+        }
+        if connection.isVideoRotationAngleSupported(angle) {
+            connection.videoRotationAngle = angle
+        }
     }
 
     func setPaused(_ paused: Bool) {
@@ -211,7 +279,8 @@ class ScannerViewController: UIViewController, AVCaptureMetadataOutputObjectsDel
     func metadataOutput(_ output: AVCaptureMetadataOutput, didOutput metadataObjects: [AVMetadataObject], from connection: AVCaptureConnection) {
         guard !isPaused,
               let obj = metadataObjects.first as? AVMetadataMachineReadableCodeObject,
-              let code = obj.stringValue else { return }
+              let code = obj.stringValue,
+              ProductStore.isValidJAN(code) else { return }
 
         let now = Date()
         if code == lastCode && now.timeIntervalSince(lastScanTime) < 2.0 {
@@ -231,6 +300,10 @@ struct ContentView: View {
     @StateObject private var store = ProductStore()
     @State private var scannedJAN: String?
     @State private var inputName: String = ""
+    @State private var inputCount: Int = 1
+    @State private var isNewScan = true
+    @State private var showManualInput = false
+    @State private var manualJAN = ""
     @State private var showInputSheet = false
     @State private var showExporter = false
     @State private var showImporter = false
@@ -250,7 +323,7 @@ struct ContentView: View {
                 ZStack {
                     BarcodeScannerView(onScanned: { code in
                         handleScan(code)
-                    }, isPaused: $showInputSheet)
+                    }, isPaused: Binding(get: { showInputSheet || showManualInput || showImporter || showExporter }, set: { _ in }))
                     .frame(height: 240)
                     .clipped()
 
@@ -277,6 +350,8 @@ struct ContentView: View {
                         Button {
                             scannedJAN = item.jan
                             inputName = item.name
+                            inputCount = item.count
+                            isNewScan = false
                             showInputSheet = true
                         } label: {
                             HStack {
@@ -299,13 +374,24 @@ struct ContentView: View {
                             }
                         }
                     }
-                    .onDelete(perform: store.delete)
+                    .onDelete { offsets in
+                        let ids = offsets.map { filteredItems[$0].jan }
+                        store.delete(ids: ids)
+                    }
                 }
                 .searchable(text: $searchText, prompt: "JANまたは商品名で検索")
             }
             .navigationTitle("JANスキャナー (\(store.items.count))")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button {
+                        manualJAN = ""
+                        showManualInput = true
+                    } label: {
+                        Image(systemName: "keyboard")
+                    }
+                }
                 ToolbarItem(placement: .topBarTrailing) {
                     Menu {
                         Button {
@@ -335,6 +421,12 @@ struct ContentView: View {
                                 .submitLabel(.done)
                                 .onSubmit { saveCurrent() }
                         }
+                        Section(isNewScan ? "数量（読み取りで+1されます）" : "数量") {
+                            Stepper(value: $inputCount, in: 0...99999) {
+                                Text("\(inputCount)")
+                                    .font(.title3.monospacedDigit())
+                            }
+                        }
                     }
                     .navigationTitle("商品登録")
                     .navigationBarTitleDisplayMode(.inline)
@@ -348,7 +440,22 @@ struct ContentView: View {
                         }
                     }
                 }
-                .presentationDetents([.medium])
+                .presentationDetents([.medium, .large])
+            }
+            .alert("JANコードを手入力", isPresented: $showManualInput) {
+                TextField("13桁または8桁", text: $manualJAN)
+                    .keyboardType(.numberPad)
+                Button("キャンセル", role: .cancel) {}
+                Button("決定") {
+                    let code = manualJAN.filter { $0.isNumber }
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+                        if ProductStore.isValidJAN(code) {
+                            handleScan(code)
+                        } else {
+                            alertMessage = "JANコードが正しくありません（桁数またはチェックデジットを確認してください）"
+                        }
+                    }
+                }
             }
             .fileExporter(
                 isPresented: $showExporter,
@@ -391,17 +498,20 @@ struct ContentView: View {
 
     private func handleScan(_ code: String) {
         scannedJAN = code
+        isNewScan = true
         if let existing = store.items.first(where: { $0.jan == code }) {
             inputName = existing.name
+            inputCount = existing.count + 1
         } else {
             inputName = ""
+            inputCount = 1
         }
         showInputSheet = true
     }
 
     private func saveCurrent() {
         guard let jan = scannedJAN else { return }
-        store.upsert(jan: jan, name: inputName.trimmingCharacters(in: .whitespaces))
+        store.upsert(jan: jan, name: inputName.trimmingCharacters(in: .whitespaces), count: inputCount)
         showInputSheet = false
     }
 }
