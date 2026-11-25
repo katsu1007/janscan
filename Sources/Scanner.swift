@@ -1,5 +1,6 @@
 import SwiftUI
 import AVFoundation
+import Vision
 
 struct BarcodeScannerView: UIViewControllerRepresentable {
     var onScanned: (String) -> Void
@@ -21,7 +22,7 @@ struct BarcodeScannerView: UIViewControllerRepresentable {
     }
 }
 
-final class ScannerViewController: UIViewController, AVCaptureMetadataOutputObjectsDelegate {
+final class ScannerViewController: UIViewController, AVCaptureMetadataOutputObjectsDelegate, AVCaptureVideoDataOutputSampleBufferDelegate {
     var onScanned: ((String) -> Void)?
     private let session = AVCaptureSession()
     private var previewLayer: AVCaptureVideoPreviewLayer?
@@ -32,6 +33,12 @@ final class ScannerViewController: UIViewController, AVCaptureMetadataOutputObje
     private var baseZoom: CGFloat = 1     // 「1x」（普通の広角カメラ）にあたる倍率
     private var requestedZoom: Double = 1
     private var requestedTorch = false
+
+    // Vision（角度・傾きに強い読み取り）
+    private let videoQueue = DispatchQueue(label: "janscanner.vision")
+    private let roiLock = NSLock()
+    private var visionROI = CGRect(x: 0, y: 0, width: 1, height: 1)   // センサー座標・左下原点
+    private var visionBusy = false
 
     /// 実際に読み取る範囲（枠より上下に広い）
     private var readRect: CGRect {
@@ -114,10 +121,17 @@ final class ScannerViewController: UIViewController, AVCaptureMetadataOutputObje
             // 棚ラベル（Code128など）と商品のJANの両方を読む
             let wanted: [AVMetadataObject.ObjectType] = [
                 .code128, .ean13, .ean8, .upce, .code39, .code39Mod43, .code93,
-                .itf14, .interleaved2of5, .qr, .dataMatrix
+                .itf14, .qr, .dataMatrix
             ]
             output.metadataObjectTypes = wanted.filter { output.availableMetadataObjectTypes.contains($0) }
             metadataOutput = output
+        }
+
+        let videoOutput = AVCaptureVideoDataOutput()
+        videoOutput.alwaysDiscardsLateVideoFrames = true
+        videoOutput.setSampleBufferDelegate(self, queue: videoQueue)
+        if session.canAddOutput(videoOutput) {
+            session.addOutput(videoOutput)
         }
 
         let preview = AVCaptureVideoPreviewLayer(session: session)
@@ -147,7 +161,56 @@ final class ScannerViewController: UIViewController, AVCaptureMetadataOutputObje
         guard let layer = previewLayer, let output = metadataOutput, session.isRunning else { return }
         // 角度が付いて斜めに映っても読めるよう、上下を広めに取る
         let r = readRect
-        output.rectOfInterest = layer.metadataOutputRectConverted(fromLayerRect: r)
+        let m = layer.metadataOutputRectConverted(fromLayerRect: r)
+        output.rectOfInterest = m
+        // Visionは左下原点なので上下を反転
+        var roi = CGRect(x: m.minX, y: 1 - m.maxY, width: m.width, height: m.height)
+        roi = roi.intersection(CGRect(x: 0, y: 0, width: 1, height: 1))
+        roiLock.lock()
+        visionROI = roi.isNull || roi.isEmpty ? CGRect(x: 0, y: 0, width: 1, height: 1) : roi
+        roiLock.unlock()
+    }
+
+    // MARK: Vision
+    func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
+        guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
+        roiLock.lock()
+        if visionBusy { roiLock.unlock(); return }
+        visionBusy = true
+        let roi = visionROI
+        roiLock.unlock()
+        defer {
+            roiLock.lock(); visionBusy = false; roiLock.unlock()
+        }
+
+        let request = VNDetectBarcodesRequest()
+        request.symbologies = [.code128, .ean13, .ean8, .upce, .code39, .code39Checksum,
+                               .code39FullASCII, .code93, .itf14, .qr, .dataMatrix]
+        request.regionOfInterest = roi
+        // 向きは指定しない（センサーの向きのまま）。座標をプレビューに合わせて変換する
+        let handler = VNImageRequestHandler(cvPixelBuffer: pixelBuffer, orientation: .up, options: [:])
+        guard (try? handler.perform([request])) != nil,
+              let results = request.results, !results.isEmpty else { return }
+
+        var found: [(String, CGRect)] = []
+        for obs in results {
+            guard let v = obs.payloadStringValue, !v.isEmpty else { continue }
+            // boundingBox は regionOfInterest 内の正規化座標 → 画像全体の座標へ
+            let b = obs.boundingBox
+            let full = CGRect(x: roi.minX + b.minX * roi.width,
+                              y: roi.minY + b.minY * roi.height,
+                              width: b.width * roi.width,
+                              height: b.height * roi.height)
+            // 左下原点 → 左上原点（メタデータ座標）
+            let meta = CGRect(x: full.minX, y: 1 - full.maxY, width: full.width, height: full.height)
+            found.append((v, meta))
+        }
+        guard !found.isEmpty else { return }
+        DispatchQueue.main.async {
+            guard let layer = self.previewLayer else { return }
+            let converted = found.map { ($0.0, layer.layerRectConverted(fromMetadataOutputRect: $0.1)) }
+            self.handleCandidates(converted)
+        }
     }
 
     private func updatePreviewRotation() {
@@ -200,14 +263,22 @@ final class ScannerViewController: UIViewController, AVCaptureMetadataOutputObje
     }
 
     func metadataOutput(_ output: AVCaptureMetadataOutput, didOutput metadataObjects: [AVMetadataObject], from connection: AVCaptureConnection) {
-        // 複数のバーコードが映った時は、枠の中心に一番近いものを選ぶ
+        var list: [(String, CGRect)] = []
+        for o in metadataObjects {
+            guard let c = o as? AVMetadataMachineReadableCodeObject, let v = c.stringValue,
+                  let rect = previewLayer?.transformedMetadataObject(for: c)?.bounds else { continue }
+            list.append((v, rect))
+        }
+        handleCandidates(list)
+    }
+
+    /// 見つかったバーコード（画面上の位置つき）から、枠の中心に一番近いものを採用
+    private func handleCandidates(_ list: [(String, CGRect)]) {
         let center = CGPoint(x: scanRect.midX, y: scanRect.midY)
         var best: (code: String, dist: CGFloat)?
-        for o in metadataObjects {
-            guard let c = o as? AVMetadataMachineReadableCodeObject, let v = c.stringValue else { continue }
-            let rect = previewLayer?.transformedMetadataObject(for: c)?.bounds ?? .zero
-            // 中心が枠の外にあるものは無視
-            if previewLayer != nil && !readRect.contains(CGPoint(x: rect.midX, y: rect.midY)) { continue }
+        for (v, rect) in list {
+            // 中心が読み取り範囲の外にあるものは無視
+            if !readRect.contains(CGPoint(x: rect.midX, y: rect.midY)) { continue }
             let d = hypot(rect.midX - center.x, rect.midY - center.y)
             if best == nil || d < best!.dist { best = (v, d) }
         }
