@@ -99,7 +99,7 @@ struct ContentView: View {
             .sheet(item: $sheet) { s in sheetView(s) }
             .fileImporter(
                 isPresented: $showImporter,
-                allowedContentTypes: [.commaSeparatedText, .plainText, UTType(filenameExtension: "xlsx") ?? .data, .spreadsheet],
+                allowedContentTypes: [.item],
                 allowsMultipleSelection: false
             ) { result in
                 switch result {

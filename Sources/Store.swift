@@ -167,12 +167,23 @@ final class InventoryStore: ObservableObject {
     }
 
     // MARK: 読み込み
+    enum ImportError: LocalizedError {
+        case oldExcel
+        var errorDescription: String? {
+            "古い形式のExcelファイル（.xls）は読み込めません。Excelで「.xlsx」または「CSV」形式で保存し直してください。"
+        }
+    }
+
     struct ImportResult { var added = 0; var updated = 0; var skipped = 0 }
 
     func importFile(url: URL) throws -> ImportResult {
         let accessing = url.startAccessingSecurityScopedResource()
         defer { if accessing { url.stopAccessingSecurityScopedResource() } }
         let data = try Data(contentsOf: url)
+        let ext = url.pathExtension.lowercased()
+        if ext == "xls" || data.starts(with: [0xD0, 0xCF, 0x11, 0xE0]) {
+            throw ImportError.oldExcel
+        }
         let table: [[String]]
         if url.pathExtension.lowercased() == "xlsx" || data.starts(with: [0x50, 0x4B, 0x03, 0x04]) {
             table = try XLSXReader.readFirstSheet(data: data)
